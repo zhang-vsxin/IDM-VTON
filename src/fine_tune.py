@@ -490,6 +490,8 @@ def main():
     optimizer = torch.optim.Adam(unet.parameters(), lr=1e-6)
     criterion = torch.nn.MSELoss()  # Replace with the specific loss functions from IDM-VTON paper
 
+    num_prompts = 1
+    
     # Training loop
     for epoch in range(100):  # Train for 10 epochs, batch size of 24
         unet.train()
@@ -498,10 +500,77 @@ def main():
             optimizer.zero_grad()
 
             # Forward pass
-            outputs = unet(batch['image'])
+            img_emb_list = []
+            for i in range(batch['cloth'].shape[0]):
+                img_emb_list.append(batch['cloth'][i])
+            
+            prompt = batch["caption"]
+
+            num_prompts = batch['cloth'].shape[0]                                        
+            negative_prompt = "monochrome, lowres, bad anatomy, worst quality, low quality"
+
+            if not isinstance(prompt, List):
+                prompt = [prompt] * num_prompts
+            if not isinstance(negative_prompt, List):
+                negative_prompt = [negative_prompt] * num_prompts
+
+            image_embeds = torch.cat(img_emb_list,dim=0)
+                    
+            (
+                prompt_embeds,
+                negative_prompt_embeds,
+                pooled_prompt_embeds,
+                negative_pooled_prompt_embeds,
+            ) = pipe.encode_prompt(
+                prompt,
+                num_images_per_prompt=1,
+                do_classifier_free_guidance=True,
+                negative_prompt=negative_prompt,
+            )
+        
+            # 服装 caption
+            prompt = batch["caption_cloth"]
+            negative_prompt = "monochrome, lowres, bad anatomy, worst quality, low quality"
+
+            if not isinstance(prompt, List):
+                prompt = [prompt] * num_prompts
+            if not isinstance(negative_prompt, List):
+                negative_prompt = [negative_prompt] * num_prompts
+
+            (
+                prompt_embeds_c,
+                _,
+                _,
+                _,
+            ) = pipe.encode_prompt(
+                prompt,
+                num_images_per_prompt=1,
+                do_classifier_free_guidance=False,
+                negative_prompt=negative_prompt,
+            )
+            
+            generator = torch.Generator(pipe.device).manual_seed(args.seed) if args.seed is not None else None
+            images = pipe(
+                prompt_embeds=prompt_embeds,
+                negative_prompt_embeds=negative_prompt_embeds,
+                pooled_prompt_embeds=pooled_prompt_embeds,
+                negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+                num_inference_steps=args.num_inference_steps,
+                generator=generator,
+                strength = 1.0,
+                pose_img = batch['pose_img'],
+                text_embeds_cloth=prompt_embeds_c,
+                cloth = batch["cloth_pure"].to(accelerator.device),
+                mask_image=batch['inpaint_mask'],
+                image=(batch['image']+1.0)/2.0, 
+                height=args.height,
+                width=args.width,
+                guidance_scale=args.guidance_scale,
+                ip_adapter_image = image_embeds,
+            )[0]
 
             # Compute loss
-            loss = criterion(outputs, batch['image'])  # Modify based on actual use case
+            loss = criterion(images, batch['image'])  # Modify based on actual use case
 
             # Backward pass and optimization
             loss.backward()
