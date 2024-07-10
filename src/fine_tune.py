@@ -78,13 +78,11 @@ def parse_args():
     parser.add_argument("--unpaired",action="store_true",)
     parser.add_argument("--data_dir",type=str,default="/home/omnious/workspace/yisol/Dataset/zalando")
     parser.add_argument("--seed", type=int, default=42,)
-    parser.add_argument("--test_batch_size", type=int, default=2,)
+    parser.add_argument("--batch_size", type=int, default=2,)
     parser.add_argument("--guidance_scale",type=float,default=2.0,)
     parser.add_argument("--mixed_precision",type=str,default=None,choices=["no", "fp16", "bf16"],)
     parser.add_argument("--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers.")
     args = parser.parse_args()
-
-
     return args
 
 def pil_to_tensor(images):
@@ -463,9 +461,11 @@ def main():
         category=args.category,
         size=(args.height, args.width),
     )
+    # 这些数据需要增强
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         shuffle=True,
+        # batch size == 24
         batch_size=args.batch_size,
         num_workers=4,
     )
@@ -486,11 +486,12 @@ def main():
     pipe.unet_encoder = UNet_Encoder
 
     # Define optimizer and loss function (modify as per the paper)
-    optimizer = torch.optim.Adam(unet.parameters(), lr=1e-4)
+    #   For customization, we fine-tune our model using the Adam optimizer with a fixed learning rate of 1e-6 for 100 steps.
+    optimizer = torch.optim.Adam(unet.parameters(), lr=1e-6)
     criterion = torch.nn.MSELoss()  # Replace with the specific loss functions from IDM-VTON paper
 
     # Training loop
-    for epoch in range(10):  # Train for 10 epochs
+    for epoch in range(100):  # Train for 10 epochs, batch size of 24
         unet.train()
         running_loss = 0.0
         for batch in train_dataloader:
