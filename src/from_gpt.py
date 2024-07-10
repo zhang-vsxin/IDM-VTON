@@ -1,16 +1,13 @@
 # coding=utf-8
 # Copyright 2023 The HuggingFace Inc. team. All rights reserved.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
+# Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
+# Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, Literal
 from ip_adapter.ip_adapter import Resampler
 
@@ -33,7 +30,7 @@ from packaging import version
 from torchvision import transforms
 import diffusers
 from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionPipeline, StableDiffusionXLControlNetInpaintPipeline
-from transformers import AutoTokenizer, PretrainedConfig,CLIPImageProcessor, CLIPVisionModelWithProjection,CLIPTextModelWithProjection, CLIPTextModel, CLIPTokenizer
+from transformers import AutoTokenizer, PretrainedConfig, CLIPImageProcessor, CLIPVisionModelWithProjection, CLIPTextModelWithProjection, CLIPTextModel, CLIPTokenizer
 import cv2
 from diffusers.utils.import_utils import is_xformers_available
 from numpy.linalg import lstsq
@@ -42,11 +39,9 @@ from src.unet_hacked_tryon import UNet2DConditionModel
 from src.unet_hacked_garmnet import UNet2DConditionModel as UNet2DConditionModel_ref
 from src.tryon_pipeline import StableDiffusionXLInpaintPipeline as TryonPipeline
 
-
-
 logger = get_logger(__name__, log_level="INFO")
 
-label_map={
+label_map = {
     "background": 0,
     "hat": 1,
     "hair": 2,
@@ -69,21 +64,20 @@ label_map={
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
-    parser.add_argument("--pretrained_model_name_or_path",type=str,default= "yisol/IDM-VTON",required=False,)
-    parser.add_argument("--width",type=int,default=768,)
-    parser.add_argument("--height",type=int,default=1024,)
-    parser.add_argument("--num_inference_steps",type=int,default=30,)
-    parser.add_argument("--output_dir",type=str,default="result",)
-    parser.add_argument("--category",type=str,default="upper_body",choices=["upper_body", "lower_body", "dresses"])
-    parser.add_argument("--unpaired",action="store_true",)
-    parser.add_argument("--data_dir",type=str,default="/home/omnious/workspace/yisol/Dataset/zalando")
-    parser.add_argument("--seed", type=int, default=42,)
-    parser.add_argument("--test_batch_size", type=int, default=2,)
-    parser.add_argument("--guidance_scale",type=float,default=2.0,)
-    parser.add_argument("--mixed_precision",type=str,default=None,choices=["no", "fp16", "bf16"],)
+    parser.add_argument("--pretrained_model_name_or_path", type=str, default="yisol/IDM-VTON", required=False)
+    parser.add_argument("--width", type=int, default=768)
+    parser.add_argument("--height", type=int, default=1024)
+    parser.add_argument("--num_inference_steps", type=int, default=30)
+    parser.add_argument("--output_dir", type=str, default="result")
+    parser.add_argument("--category", type=str, default="upper_body", choices=["upper_body", "lower_body", "dresses"])
+    parser.add_argument("--unpaired", action="store_true")
+    parser.add_argument("--data_dir", type=str, default="/home/omnious/workspace/yisol/Dataset/zalando")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--guidance_scale", type=float, default=2.0)
+    parser.add_argument("--mixed_precision", type=str, default=None, choices=["no", "fp16", "bf16"])
     parser.add_argument("--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers.")
     args = parser.parse_args()
-
 
     return args
 
@@ -92,18 +86,17 @@ def pil_to_tensor(images):
     images = torch.from_numpy(images.transpose(2, 0, 1))
     return images
 
-
 class DresscodeTestDataset(data.Dataset):
     def __init__(
         self,
         dataroot_path: str,
         phase: Literal["train", "test"],
         order: Literal["paired", "unpaired"] = "paired",
-        category = "upper_body",
+        category="upper_body",
         size: Tuple[int, int] = (512, 384),
     ):
         super(DresscodeTestDataset, self).__init__()
-        self.dataroot = os.path.join(dataroot_path,category)
+        self.dataroot = os.path.join(dataroot_path, category)
         self.phase = phase
         self.height = size[0]
         self.width = size[1]
@@ -121,11 +114,10 @@ class DresscodeTestDataset(data.Dataset):
         im_names = []
         c_names = []
 
-
         if phase == "train":
-            filename = os.path.join(dataroot_path,category, f"{phase}_pairs.txt")
+            filename = os.path.join(dataroot_path, category, f"{phase}_pairs.txt")
         else:
-            filename = os.path.join(dataroot_path,category, f"{phase}_pairs_{order}.txt")
+            filename = os.path.join(dataroot_path, category, f"{phase}_pairs_{order}.txt")
 
         with open(filename, "r") as f:
             for line in f.readlines():
@@ -134,8 +126,7 @@ class DresscodeTestDataset(data.Dataset):
                 im_names.append(im_name)
                 c_names.append(c_name)
 
-
-        file_path = os.path.join(dataroot_path,category,"dc_caption.txt")
+        file_path = os.path.join(dataroot_path, category, "dc_caption.txt")
 
         self.annotation_pair = {}
         with open(file_path, "r") as file:
@@ -143,10 +134,10 @@ class DresscodeTestDataset(data.Dataset):
                 parts = line.strip().split(" ")
                 self.annotation_pair[parts[0]] = ' '.join(parts[1:])
 
-
         self.im_names = im_names
         self.c_names = c_names
         self.clip_processor = CLIPImageProcessor()
+
     def __getitem__(self, index):
         c_name = self.c_names[index]
         im_name = self.im_names[index]
@@ -158,11 +149,8 @@ class DresscodeTestDataset(data.Dataset):
 
         im_pil_big = Image.open(
             os.path.join(self.dataroot, "images", im_name)
-        ).resize((self.width,self.height))
+        ).resize((self.width, self.height))
         image = self.transform(im_pil_big)
-
-
-
 
         skeleton = Image.open(os.path.join(self.dataroot, 'skeletons', im_name.replace("_0", "_5")))
         skeleton = skeleton.resize((self.width, self.height))
@@ -195,25 +183,23 @@ class DresscodeTestDataset(data.Dataset):
             one_map = self.toTensor(one_map)
             pose_map[i] = one_map[0]
 
-        agnostic_mask = self.get_agnostic(parse_array, pose_data, self.category, (self.width,self.height))
-        # agnostic_mask = transforms.functional.resize(agnostic_mask, (self.height, self.width),
-        #                                              interpolation=transforms.InterpolationMode.NEAREST)
+        agnostic_mask = self.get_agnostic(parse_array, pose_data, self.category, (self.width, self.height))
 
         mask = 1 - agnostic_mask
-        im_mask = image * agnostic_mask 
-        
+        im_mask = image * agnostic_mask
+
         pose_img = Image.open(
             os.path.join(self.dataroot, "image-densepose", im_name)
         )
         pose_img = self.transform(pose_img)  # [-1,1]
- 
+
         result = {}
         result["c_name"] = c_name
         result["im_name"] = im_name
         result["image"] = image
         result["cloth_pure"] = self.transform(cloth)
         result["cloth"] = self.clip_processor(images=cloth, return_tensors="pt").pixel_values
-        result["inpaint_mask"] =mask
+        result["inpaint_mask"] = mask
         result["im_mask"] = im_mask
         result["caption_cloth"] = "a photo of " + cloth_annotation
         result["caption"] = "model is wearing a " + cloth_annotation
@@ -225,10 +211,7 @@ class DresscodeTestDataset(data.Dataset):
         # model images + cloth image
         return len(self.im_names)
 
-
-
-
-    def get_agnostic(self,parse_array, pose_data, category, size):
+    def get_agnostic(self, parse_array, pose_data, category, size):
         parse_shape = (parse_array > 0).astype(np.float32)
 
         parse_head = (parse_array == 1).astype(np.float32) + \
@@ -347,9 +330,6 @@ class DresscodeTestDataset(data.Dataset):
         agnostic_mask = parse_mask_total.unsqueeze(0)
         return agnostic_mask
 
-
-
-
 def main():
     args = parse_args()
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir)
@@ -373,14 +353,8 @@ def main():
             os.makedirs(args.output_dir, exist_ok=True)
 
     weight_dtype = torch.float16
-    # if accelerator.mixed_precision == "fp16":
-    #     weight_dtype = torch.float16
-    #     args.mixed_precision = accelerator.mixed_precision
-    # elif accelerator.mixed_precision == "bf16":
-    #     weight_dtype = torch.bfloat16
-    #     args.mixed_precision = accelerator.mixed_precision
 
-    # Load scheduler, tokenizer and models.
+    # Load scheduler, tokenizer, and models.
     noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
     vae = AutoencoderKL.from_pretrained(
         args.pretrained_model_name_or_path,
@@ -425,7 +399,6 @@ def main():
         use_fast=False,
     )
 
-
     # Freeze all models except UNet
     vae.requires_grad_(False)
     image_encoder.requires_grad_(False)
@@ -441,8 +414,7 @@ def main():
     text_encoder_one.to(accelerator.device, weight_dtype)
     text_encoder_two.to(accelerator.device, weight_dtype)
     unet.to(accelerator.device, weight_dtype)
-    
-    
+
     if args.enable_xformers_memory_efficient_attention:
         if is_xformers_available():
             import xformers
@@ -455,7 +427,7 @@ def main():
             unet.enable_xformers_memory_efficient_attention()
         else:
             raise ValueError("xformers is not available. Make sure it is installed correctly")
-    
+
     train_dataset = DresscodeTestDataset(
         dataroot_path=args.data_dir,
         phase="train",
@@ -474,12 +446,12 @@ def main():
             args.pretrained_model_name_or_path,
             unet=unet,
             vae=vae,
-            feature_extractor= CLIPImageProcessor(),
-            text_encoder = text_encoder_one,
-            text_encoder_2 = text_encoder_two,
-            tokenizer = tokenizer_one,
-            tokenizer_2 = tokenizer_two,
-            scheduler = noise_scheduler,
+            feature_extractor=CLIPImageProcessor(),
+            text_encoder=text_encoder_one,
+            text_encoder_2=text_encoder_two,
+            tokenizer=tokenizer_one,
+            tokenizer_2=tokenizer_two,
+            scheduler=noise_scheduler,
             image_encoder=image_encoder,
             torch_dtype=torch.float16,
     ).to(accelerator.device)
@@ -514,7 +486,6 @@ def main():
     output_dir = os.path.join(args.output_dir, "fine_tuned_model")
     os.makedirs(output_dir, exist_ok=True)
     unet.save_pretrained(output_dir)
-
 
 if __name__ == "__main__":
     main()
