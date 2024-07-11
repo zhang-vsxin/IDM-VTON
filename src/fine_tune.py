@@ -423,7 +423,6 @@ def main():
         use_fast=False,
     )
 
-
     # Freeze all models except UNet
     vae.requires_grad_(False)
     image_encoder.requires_grad_(False)
@@ -439,7 +438,6 @@ def main():
     text_encoder_one.to(accelerator.device, weight_dtype)
     text_encoder_two.to(accelerator.device, weight_dtype)
     unet.to(accelerator.device, weight_dtype)
-    
     
     if args.enable_xformers_memory_efficient_attention:
         if is_xformers_available():
@@ -486,14 +484,14 @@ def main():
     pipe.unet_encoder = UNet_Encoder
 
     # Define optimizer and loss function (modify as per the paper)
-    #   For customization, we fine-tune our model using the Adam optimizer with a fixed learning rate of 1e-6 for 100 steps.
+    # For customization, we fine-tune our model using the Adam optimizer with a fixed learning rate of 1e-6 for 100 steps.
     optimizer = torch.optim.Adam(unet.parameters(), lr=1e-6)
     criterion = torch.nn.MSELoss()  # Replace with the specific loss functions from IDM-VTON paper
 
     num_prompts = 1
     
     # Training loop
-    for epoch in range(100):  # Train for 10 epochs, batch size of 24
+    for epoch in range(100):  # Train for 100 epochs, batch size of 24
         unet.train()
         running_loss = 0.0
         for batch in train_dataloader:
