@@ -252,6 +252,7 @@ def retrieve_latents(
     encoder_output: torch.Tensor, generator: Optional[torch.Generator] = None, sample_mode: str = "sample"
 ):
     if hasattr(encoder_output, "latent_dist") and sample_mode == "sample":
+        # TODO: COLOR DIFF
         return encoder_output.latent_dist.sample(generator)
     elif hasattr(encoder_output, "latent_dist") and sample_mode == "argmax":
         return encoder_output.latent_dist.mode()
@@ -456,20 +457,31 @@ class StableDiffusionXLInpaintPipeline(
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.encode_image
     def encode_image(self, image, device, num_images_per_prompt, output_hidden_states=None):
         dtype = next(self.image_encoder.parameters()).dtype
-        # print(image.shape)
         if not isinstance(image, torch.Tensor):
             image = self.feature_extractor(image, return_tensors="pt").pixel_values
 
         image = image.to(device=device, dtype=dtype)
+        # print(f"encode image (initial): {image.dtype}")
+
         if output_hidden_states:
             image_enc_hidden_states = self.image_encoder(image, output_hidden_states=True).hidden_states[-2]
+            # print(f"encode image (after encoding): {image_enc_hidden_states.dtype}")
+            
             image_enc_hidden_states = image_enc_hidden_states.repeat_interleave(num_images_per_prompt, dim=0)
+            # print(f"encode image (after repeat_interleave): {image_enc_hidden_states.dtype}")
+            
             uncond_image_enc_hidden_states = self.image_encoder(
                 torch.zeros_like(image), output_hidden_states=True
             ).hidden_states[-2]
+            # print(f"encode image (uncond encoding): {uncond_image_enc_hidden_states.dtype}")
+            
             uncond_image_enc_hidden_states = uncond_image_enc_hidden_states.repeat_interleave(
                 num_images_per_prompt, dim=0
             )
+            # print(f"encode image (uncond after repeat_interleave): {uncond_image_enc_hidden_states.dtype}")
+
+            # print(f"encode image (final): {image_enc_hidden_states.dtype}")
+
             return image_enc_hidden_states, uncond_image_enc_hidden_states
         else:
             image_embeds = self.image_encoder(image).image_embeds
@@ -488,10 +500,12 @@ class StableDiffusionXLInpaintPipeline(
         #         f"`ip_adapter_image` must have same length as the number of IP Adapters. Got {len(ip_adapter_image)} images and {len(self.unet.encoder_hid_proj.image_projection_layers)} IP Adapters."
         #     )
         output_hidden_state = not isinstance(self.unet.encoder_hid_proj, ImageProjection)
-        # print(output_hidden_state)
+        # print(f"output_hidden_state: {output_hidden_state}")
+        # print(f"DEBUG; encode image: {ip_adapter_image.dtype}")
         image_embeds, negative_image_embeds = self.encode_image(
             ip_adapter_image, device, 1, output_hidden_state
         )
+        # print(f"DEBUG; encode image: {image_embeds.dtype}")
         # print(single_image_embeds.shape)
         # single_image_embeds = torch.stack([single_image_embeds] * num_images_per_prompt, dim=0)
         # single_negative_image_embeds = torch.stack([single_negative_image_embeds] * num_images_per_prompt, dim=0)
@@ -882,7 +896,13 @@ class StableDiffusionXLInpaintPipeline(
             image_latents = self._encode_vae_image(image=image, generator=generator)
             image_latents = image_latents.repeat(batch_size // image_latents.shape[0], 1, 1, 1)
 
+        # print(f"image {image.shape} is_strength_max: {is_strength_max}, latents: {latents}, add_noise: {add_noise}")
+        # import os
+        # os._exit(os.EX_OK)
+        
         if latents is None and add_noise:
+            # TODO: COLOR DIFF
+            # noise = torch.randn_like(image_latents)
             noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
             # if strength is 1. then initialise the latents to noise, else initial to image + noise
             latents = noise if is_strength_max else self.scheduler.add_noise(image_latents, noise, timestep)
@@ -1206,6 +1226,42 @@ class StableDiffusionXLInpaintPipeline(
             emb = torch.nn.functional.pad(emb, (0, 1))
         assert emb.shape == (w.shape[0], embedding_dim)
         return emb
+    
+    def reconstruct_vae_img(self, latent_img, output_type, do_classifier_free_guidance = None):
+        """
+        Reconstructs the original pose image from the latent representation and reverses the concatenation operation if needed.
+
+        Args:
+            latent_img (torch.Tensor): The latent representation of the pose image.
+            vae (VAE): The VAE model used for encoding and decoding.
+            device (torch.device): The device to perform computations on.
+            dtype (torch.dtype): The data type of the original embeddings.
+            scaling_factor (float): The scaling factor used during encoding.
+            do_classifier_free_guidance (bool): Flag indicating whether classifier-free guidance was used.
+
+        Returns:
+            torch.Tensor: The reconstructed original pose image.
+        """
+        if do_classifier_free_guidance is None:
+            do_classifier_free_guidance = self.do_classifier_free_guidance
+        
+        # Reverse the scaling factor
+        latent_img = latent_img / self.vae.config.scaling_factor
+        
+        # Reverse the concatenation if classifier-free guidance was used
+        if do_classifier_free_guidance:
+            original_shape = latent_img.shape[0] // 2, *latent_img.shape[1:]
+            latent_img = latent_img.view(2, *original_shape).select(0, 0)
+            # or using slicing
+            # latent_img = latent_img[:original_shape[0]]
+
+        # Decode the latent representation back to image space
+        reconstructed_pose_img = self.vae.decode(latent_img, return_dict=False)[0]
+
+        reconstructed_pose_img = self.image_processor.postprocess(reconstructed_pose_img, output_type=output_type)
+        
+        return reconstructed_pose_img
+
 
     @property
     def guidance_scale(self):
@@ -1275,6 +1331,7 @@ class StableDiffusionXLInpaintPipeline(
         pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
         negative_pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
         ip_adapter_image: Optional[PipelineImageInput] = None,
+        inference_sampling_step: Optional[int] = None,
         output_type: Optional[str] = "pil",
         cloth =None,
         pose_img = None,
@@ -1570,6 +1627,8 @@ class StableDiffusionXLInpaintPipeline(
             )
         # at which timestep to set the initial noise (n.b. 50% if strength is 0.5)
         latent_timestep = timesteps[:1].repeat(batch_size * num_images_per_prompt)
+        # print(f"timesteps of inferencing: {timesteps}, latent_timestep: {latent_timestep}")
+
         # create a boolean to check if the strength is set to 1. if so then initialise the latents with pure noise
         is_strength_max = strength == 1.0
 
@@ -1620,11 +1679,20 @@ class StableDiffusionXLInpaintPipeline(
             return_noise=True,
             return_image_latents=return_image_latents,
         )
+        before_inference_images = []
 
         if return_image_latents:
             latents, noise, image_latents = latents_outputs
+            if inference_sampling_step is not None:
+                noise_image = self.reconstruct_vae_img(noise, output_type, False)
+                before_inference_images.append(noise_image)
+                image_latents_image = self.reconstruct_vae_img(image_latents, output_type, False)
+                before_inference_images.append(image_latents_image)
         else:
             latents, noise = latents_outputs
+            if inference_sampling_step is not None:
+                noise_image = self.reconstruct_vae_img(noise, output_type, False)
+                before_inference_images.append(noise_image)
 
         # 7. Prepare mask latent variables
         mask, masked_image_latents = self.prepare_mask_latents(
@@ -1713,13 +1781,14 @@ class StableDiffusionXLInpaintPipeline(
         prompt_embeds = prompt_embeds.to(device)
         add_text_embeds = add_text_embeds.to(device)
         add_time_ids = add_time_ids.to(device)
-
+        # print(f"prompt_embeds shape: {prompt_embeds.shape}, {prompt_embeds.dtype}")
         if ip_adapter_image is not None:
             image_embeds = self.prepare_ip_adapter_image_embeds(
                 ip_adapter_image, device, batch_size * num_images_per_prompt
             )
 
             #project outside for loop
+            # print(f"image_embeds type: {image_embeds.dtype}")
             image_embeds = self.unet.encoder_hid_proj(image_embeds).to(prompt_embeds.dtype)
 
 
@@ -1758,6 +1827,7 @@ class StableDiffusionXLInpaintPipeline(
 
 
         self._num_timesteps = len(timesteps)
+        inference_sampling_images = []
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 if self.interrupt:
@@ -1766,12 +1836,29 @@ class StableDiffusionXLInpaintPipeline(
                 latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
 
                 # concat latents, mask, masked_image_latents in the channel dimension
+                # The function scale_model_input should not be used during the training process of diffusion models. 
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
 
                 # bsz = mask.shape[0]
                 if num_channels_unet == 13:
-                    latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents,pose_img], dim=1)
+                    # print(f"{latent_model_input.shape}, {mask.shape}, {masked_image_latents.shape}, {pose_img.shape} ")
+                    latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents, pose_img], dim=1)
+                    if(inference_sampling_step is not None and i == 0):
+                        # latent_model_input_image = self.vae.decode(latent_model_input / self.vae.config.scaling_factor, return_dict=False)[0]
+                        # latent_model_input_image = self.image_processor.postprocess(latent_model_input_image, output_type=output_type)
+                        # masked_image_latents_image = self.vae.decode(masked_image_latents / self.vae.config.scaling_factor, return_dict=False)[0]
+                        # masked_image_latents_image = self.image_processor.postprocess(masked_image_latents_image, output_type=output_type)
+                        # pose_lantents_img = self.vae.decode(pose_img / self.vae.config.scaling_factor, return_dict=False)[0]
+                        # pose_lantents_img = self.image_processor.postprocess(pose_lantents_img, output_type=output_type)
+                        # before_inference_images = [latent_model_input_image, masked_image_latents_image, pose_lantents_img]
+                        masked_image_latents_image = self.reconstruct_vae_img(masked_image_latents, output_type)
+                        before_inference_images.append(masked_image_latents_image)
+                        pose_lantents_img = self.reconstruct_vae_img(pose_img, output_type)
+                        before_inference_images.append(pose_lantents_img)
+                        # before_inference_images = [masked_image_latents_image, pose_lantents_img]
+                    # import os
+                    # os._exit(os.EX_OK)
 
                 # if num_channels_unet == 9:
                 #     latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
@@ -1780,6 +1867,8 @@ class StableDiffusionXLInpaintPipeline(
                 added_cond_kwargs = {"text_embeds": add_text_embeds, "time_ids": add_time_ids}
                 if ip_adapter_image is not None:
                     added_cond_kwargs["image_embeds"] = image_embeds
+                    # print(f"image_embeds shape: {image_embeds.shape}")
+
                 # down,reference_features = self.UNet_Encoder(cloth,t, text_embeds_cloth,added_cond_kwargs= {"text_embeds": pooled_prompt_embeds_c, "time_ids": add_time_ids},return_dict=False)
                 down,reference_features = self.unet_encoder(cloth,t, text_embeds_cloth,return_dict=False)
                 # print(type(reference_features))
@@ -1792,7 +1881,7 @@ class StableDiffusionXLInpaintPipeline(
                 if self.do_classifier_free_guidance:
                     reference_features = [torch.cat([torch.zeros_like(d), d]) for d in reference_features]
 
-
+                # print(f"{latent_model_input.shape}")
                 noise_pred = self.unet(
                     latent_model_input,
                     t,
@@ -1834,6 +1923,14 @@ class StableDiffusionXLInpaintPipeline(
 
                     latents = (1 - init_mask) * init_latents_proper + init_mask * latents
 
+                if inference_sampling_step is not None:
+                    if i % inference_sampling_step == 0:
+                        internal_image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
+                        internal_image = self.image_processor.postprocess(internal_image, output_type=output_type)
+                        inference_sampling_images.append(internal_image)
+                        # noise_pred_image = self.reconstruct_vae_img(noise_pred,output_type, False)
+                        # inference_sampling_images.append(noise_pred_image)
+                        
                 if callback_on_step_end is not None:
                     callback_kwargs = {}
                     for k in callback_on_step_end_tensor_inputs:
@@ -1888,6 +1985,6 @@ class StableDiffusionXLInpaintPipeline(
         self.maybe_free_model_hooks()
 
         # if not return_dict:
-        return (image,)
+        return (image, inference_sampling_images, before_inference_images)
 
         # return StableDiffusionXLPipelineOutput(images=image)
